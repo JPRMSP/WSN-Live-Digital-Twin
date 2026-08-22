@@ -1,353 +1,479 @@
 import streamlit as st
-import networkx as nx
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-import time
 
-st.set_page_config(page_title="WSN Live Digital Twin", page_icon="📡", layout="wide")
+st.set_page_config(page_title="WSN Sentinel", page_icon="📡", layout="wide")
 
-st.markdown("""
-<style>
-.main {background:#07111f;}
-.metric-card {padding:12px;border-radius:12px;background:#101d30;}
-h1,h2,h3 {color:#42d9ff;}
-</style>
-""", unsafe_allow_html=True)
-
-st.title("📡 WSN Live Digital Twin")
-st.caption("Real-time Wireless Sensor Network • Energy • Routing • Packet Delivery • Fault Detection")
+st.title("📡 WSN Sentinel")
+st.caption("Real-Time Energy-Aware Wireless Sensor Network Digital Twin")
 
 if "nodes" not in st.session_state:
     st.session_state.nodes = None
-    st.session_state.graph = None
     st.session_state.energy = {}
+    st.session_state.history = []
+    st.session_state.events = []
+    st.session_state.running = False
+    st.session_state.cycle = 0
     st.session_state.sent = 0
     st.session_state.delivered = 0
     st.session_state.dropped = 0
-    st.session_state.tick = 0
-    st.session_state.running = False
-    st.session_state.history = []
-    st.session_state.alerts = []
+    st.session_state.target = None
+    st.session_state.faults = set()
 
 with st.sidebar:
-    st.header("⚙️ Network Configuration")
-    n_nodes = st.slider("Sensor nodes", 10, 80, 30)
-    area = st.slider("Deployment area", 50, 500, 200)
-    radius = st.slider("Radio range", 20, 120, 65)
-    battery = st.slider("Initial energy (J)", 10.0, 100.0, 50.0)
-    packet_rate = st.slider("Packets / cycle", 1, 20, 5)
-    routing = st.selectbox(
-        "Routing protocol",
-        ["Energy-Aware", "Shortest Path", "Minimum Hop", "Gossiping"]
-    )
-    seed = st.number_input("Network seed", 1, 9999, 42)
-    interval = st.slider("Refresh interval (sec)", 1, 5, 2)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        create = st.button("🚀 Deploy")
-    with c2:
-        reset = st.button("🔄 Reset")
-
-    if create:
-        np.random.seed(seed)
-        positions = {
-            i: (np.random.uniform(0, area), np.random.uniform(0, area))
-            for i in range(n_nodes)
-        }
-        G = nx.Graph()
-        G.add_nodes_from(range(n_nodes))
-        for i in range(n_nodes):
-            for j in range(i + 1, n_nodes):
-                d = np.linalg.norm(
-                    np.array(positions[i]) - np.array(positions[j])
-                )
-                if d <= radius:
-                    G.add_edge(i, j, distance=d)
-
-        st.session_state.nodes = positions
-        st.session_state.graph = G
-        st.session_state.energy = {i: battery for i in range(n_nodes)}
-        st.session_state.sent = 0
-        st.session_state.delivered = 0
-        st.session_state.dropped = 0
-        st.session_state.tick = 0
-        st.session_state.history = []
-        st.session_state.alerts = []
-        st.session_state.running = True
-
-    if reset:
-        st.session_state.nodes = None
-        st.session_state.graph = None
-        st.session_state.running = False
-        st.session_state.history = []
-        st.session_state.alerts = []
+    st.header("⚙️ Network Setup")
+    node_count = st.slider("Sensor Nodes", 10, 60, 30)
+    field_size = st.slider("Field Size", 100, 500, 250)
+    radio_range = st.slider("Radio Range", 25, 120, 65)
+    initial_energy = st.slider("Battery (J)", 10, 100, 50)
+    packets_cycle = st.slider("Packets / Cycle", 1, 15, 5)
+    seed = st.number_input("Simulation Seed", 1, 9999, 42)
 
     st.divider()
-    st.subheader("🎯 Live Controls")
-    if st.button("▶️ Start / Pause"):
-        st.session_state.running = not st.session_state.running
-
-if st.session_state.graph is None:
-    st.info("Deploy the sensor network from the sidebar to start the digital twin.")
-    st.stop()
-
-G = st.session_state.graph
-positions = st.session_state.nodes
-energy = st.session_state.energy
-
-if st.session_state.running:
-    st_autorefresh(
-        interval=interval * 1000,
-        limit=None,
-        key="wsn_refresh"
+    st.header("🧭 Routing")
+    routing = st.selectbox(
+        "Routing Algorithm",
+        ["Energy-Aware", "Nearest Neighbor", "Geographic"]
     )
 
-    alive = [n for n, e in energy.items() if e > 0]
-    if len(alive) >= 2:
-        source = np.random.choice(alive)
-        sink = max(alive, key=lambda x: positions[x][1])
+    st.divider()
+    deploy = st.button("🚀 Deploy Network", use_container_width=True)
+    start = st.button("▶️ Start / Pause", use_container_width=True)
+    target_button = st.button("🎯 Generate Target", use_container_width=True)
+    fault_button = st.button("💥 Simulate Node Fault", use_container_width=True)
+    reset = st.button("🔄 Reset", use_container_width=True)
 
-        for _ in range(packet_rate):
-            st.session_state.sent += 1
-            alive = [n for n, e in energy.items() if e > 0]
+if reset:
+    for key in [
+        "nodes", "energy", "history", "events",
+        "target", "faults"
+    ]:
+        if key in st.session_state:
+            st.session_state[key] = None if key in ["nodes", "target"] else []
+    st.session_state.energy = {}
+    st.session_state.history = []
+    st.session_state.events = []
+    st.session_state.faults = set()
+    st.session_state.running = False
+    st.session_state.cycle = 0
+    st.session_state.sent = 0
+    st.session_state.delivered = 0
+    st.session_state.dropped = 0
+    st.rerun()
 
-            if source not in alive or sink not in alive:
-                st.session_state.dropped += 1
-                continue
+if deploy:
+    rng = np.random.default_rng(seed)
 
-            try:
-                if routing == "Shortest Path":
-                    path = nx.shortest_path(G, source, sink)
-                elif routing == "Minimum Hop":
-                    path = nx.shortest_path(G, source, sink)
-                elif routing == "Energy-Aware":
-                    H = G.copy()
-                    for u, v in H.edges():
-                        eu = max(energy[u], 0.1)
-                        ev = max(energy[v], 0.1)
-                        H[u][v]["weight"] = 1 / min(eu, ev)
-                    path = nx.shortest_path(H, source, sink, weight="weight")
-                else:
-                    current = source
-                    path = [source]
-                    for _ in range(8):
-                        choices = [
-                            x for x in G.neighbors(current)
-                            if energy[x] > 0 and x not in path
-                        ]
-                        if not choices:
-                            break
-                        current = np.random.choice(choices)
-                        path.append(current)
-                        if current == sink:
-                            break
+    st.session_state.nodes = {
+        i: (
+            float(rng.uniform(10, field_size - 10)),
+            float(rng.uniform(10, field_size - 10))
+        )
+        for i in range(node_count)
+    }
 
-                if len(path) >= 2 and path[-1] == sink:
-                    cost = 0.08 * len(path)
-                    for node in path:
-                        energy[node] = max(0, energy[node] - cost)
-                    st.session_state.delivered += 1
-                else:
-                    st.session_state.dropped += 1
+    st.session_state.energy = {
+        i: float(initial_energy) for i in range(node_count)
+    }
 
-            except nx.NetworkXNoPath:
-                st.session_state.dropped += 1
+    st.session_state.history = []
+    st.session_state.events = []
+    st.session_state.faults = set()
+    st.session_state.target = None
+    st.session_state.cycle = 0
+    st.session_state.sent = 0
+    st.session_state.delivered = 0
+    st.session_state.dropped = 0
+    st.session_state.running = False
 
-        st.session_state.tick += 1
+if st.session_state.nodes is None:
+    st.info("Deploy the sensor network from the sidebar.")
+    st.stop()
 
-        for node in alive:
-            if np.random.random() < 0.12:
-                energy[node] = max(0, energy[node] - 0.015)
+nodes = st.session_state.nodes
+energy = st.session_state.energy
 
-        low_nodes = [n for n, e in energy.items() if 0 < e < battery * 0.2]
-        dead_nodes = [n for n, e in energy.items() if e <= 0]
+sink = max(nodes, key=lambda n: nodes[n][1])
 
-        if low_nodes:
-            message = f"⚠️ Low energy nodes: {len(low_nodes)}"
-            if message not in st.session_state.alerts[-3:]:
-                st.session_state.alerts.append(message)
+def distance(a, b):
+    return np.sqrt(
+        (nodes[a][0] - nodes[b][0]) ** 2 +
+        (nodes[a][1] - nodes[b][1]) ** 2
+    )
 
-        if dead_nodes:
-            message = f"🔴 Dead nodes detected: {len(dead_nodes)}"
-            if message not in st.session_state.alerts[-3:]:
-                st.session_state.alerts.append(message)
+def neighbors(node):
+    return [
+        n for n in nodes
+        if n != node
+        and n not in st.session_state.faults
+        and energy[n] > 0
+        and distance(node, n) <= radio_range
+    ]
 
-        avg_energy = np.mean(list(energy.values()))
-        delivery = (
-            100 * st.session_state.delivered / st.session_state.sent
-            if st.session_state.sent else 0
+def route(source):
+    current = source
+    path = [source]
+    visited = {source}
+
+    for _ in range(node_count):
+        if current == sink:
+            return path
+
+        candidates = [
+            n for n in neighbors(current)
+            if n not in visited
+        ]
+
+        if not candidates:
+            return []
+
+        if routing == "Nearest Neighbor":
+            nxt = min(candidates, key=lambda n: distance(n, sink))
+
+        elif routing == "Geographic":
+            nxt = min(
+                candidates,
+                key=lambda n: distance(n, sink) +
+                0.002 * distance(current, n)
+            )
+
+        else:
+            nxt = max(
+                candidates,
+                key=lambda n:
+                (energy[n] / initial_energy) /
+                (distance(n, sink) + 1)
+            )
+
+        path.append(nxt)
+        visited.add(nxt)
+        current = nxt
+
+    return []
+
+if target_button:
+    rng = np.random.default_rng()
+    st.session_state.target = (
+        float(rng.uniform(20, field_size - 20)),
+        float(rng.uniform(20, field_size - 20))
+    )
+
+    st.session_state.events.append(
+        f"🎯 Target detected at "
+        f"({st.session_state.target[0]:.1f}, "
+        f"{st.session_state.target[1]:.1f})"
+    )
+
+if fault_button:
+    alive = [
+        n for n in nodes
+        if energy[n] > 0 and n != sink
+        and n not in st.session_state.faults
+    ]
+
+    if alive:
+        failed = int(np.random.choice(alive))
+        st.session_state.faults.add(failed)
+        energy[failed] = 0
+        st.session_state.events.append(
+            f"💥 Node {failed} failed unexpectedly"
         )
 
-        st.session_state.history.append({
-            "Cycle": st.session_state.tick,
-            "Average Energy": avg_energy,
-            "Delivery Rate": delivery,
-            "Alive Nodes": len(alive),
-            "Dead Nodes": len(dead_nodes)
-        })
+if start:
+    st.session_state.running = not st.session_state.running
+
+if st.session_state.running:
+    alive = [
+        n for n in nodes
+        if energy[n] > 0 and n not in st.session_state.faults
+    ]
+
+    for _ in range(packets_cycle):
+        if len(alive) < 2:
+            break
+
+        source = int(np.random.choice(alive))
+
+        if source == sink:
+            continue
+
+        st.session_state.sent += 1
+        path = route(source)
+
+        if path:
+            transmission_cost = 0.05 + 0.01 * len(path)
+
+            for node in path:
+                energy[node] = max(
+                    0,
+                    energy[node] - transmission_cost
+                )
+
+            st.session_state.delivered += 1
+        else:
+            st.session_state.dropped += 1
+
+    for node in alive:
+        if node != sink:
+            energy[node] = max(
+                0,
+                energy[node] - np.random.uniform(0.005, 0.02)
+            )
+
+    st.session_state.cycle += 1
+
+    alive_now = sum(
+        energy[n] > 0 and n not in st.session_state.faults
+        for n in nodes
+    )
+
+    avg_energy = np.mean(list(energy.values()))
+
+    delivery = (
+        st.session_state.delivered /
+        max(st.session_state.sent, 1) * 100
+    )
+
+    st.session_state.history.append({
+        "Cycle": st.session_state.cycle,
+        "Average Energy": avg_energy,
+        "Delivery Rate": delivery,
+        "Alive Nodes": alive_now,
+        "Dead Nodes": node_count - alive_now
+    })
+
+    low = [
+        n for n in nodes
+        if 0 < energy[n] < initial_energy * 0.2
+    ]
+
+    if low:
+        st.session_state.events.append(
+            f"⚠️ Low battery warning: {len(low)} node(s)"
+        )
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
-alive_count = sum(e > 0 for e in energy.values())
+alive_count = sum(
+    energy[n] > 0 and n not in st.session_state.faults
+    for n in nodes
+)
+
 avg_energy = np.mean(list(energy.values()))
+
 delivery_rate = (
-    100 * st.session_state.delivered / st.session_state.sent
-    if st.session_state.sent else 0
+    st.session_state.delivered /
+    max(st.session_state.sent, 1) * 100
 )
 
 col1.metric("🟢 Alive", alive_count)
 col2.metric("⚡ Avg Energy", f"{avg_energy:.2f} J")
-col3.metric("📦 Packets", st.session_state.sent)
+col3.metric("📦 Sent", st.session_state.sent)
 col4.metric("✅ Delivery", f"{delivery_rate:.1f}%")
 col5.metric("❌ Dropped", st.session_state.dropped)
 
-left, right = st.columns([1.7, 1])
+left, right = st.columns([1.6, 1])
 
 with left:
-    st.subheader("🗺️ Live Sensor Network")
+    st.subheader("🗺️ Live Sensor Field")
 
-    edge_x, edge_y = [], []
-    for u, v in G.edges():
-        edge_x += [positions[u][0], positions[v][0], None]
-        edge_y += [positions[u][1], positions[v][1], None]
+    edge_x = []
+    edge_y = []
 
-    edge_trace = go.Scatter(
+    for n in nodes:
+        for nb in neighbors(n):
+            if n < nb:
+                edge_x += [nodes[n][0], nodes[nb][0], None]
+                edge_y += [nodes[n][1], nodes[nb][1], None]
+
+    edges = go.Scatter(
         x=edge_x,
         y=edge_y,
         mode="lines",
-        line=dict(color="#33485f", width=1),
+        line=dict(color="#334155", width=1),
         hoverinfo="none"
     )
 
-    node_x = [positions[n][0] for n in G.nodes()]
-    node_y = [positions[n][1] for n in G.nodes()]
-    node_energy = [energy[n] for n in G.nodes()]
+    x = [nodes[n][0] for n in nodes]
+    y = [nodes[n][1] for n in nodes]
 
-    colors = [
-        "#ff3131" if e <= 0 else
-        "#ffb000" if e < battery * 0.2 else
-        "#00ff99"
-        for e in node_energy
-    ]
+    colors = []
 
-    node_trace = go.Scatter(
-        x=node_x,
-        y=node_y,
+    for n in nodes:
+        if n == sink:
+            colors.append("#00e5ff")
+        elif n in st.session_state.faults or energy[n] <= 0:
+            colors.append("#ff1744")
+        elif energy[n] < initial_energy * 0.2:
+            colors.append("#ffb300")
+        else:
+            colors.append("#00ff88")
+
+    sensor_trace = go.Scatter(
+        x=x,
+        y=y,
         mode="markers+text",
-        text=[str(n) for n in G.nodes()],
+        text=[str(n) for n in nodes],
         textposition="top center",
         marker=dict(
-            size=14,
+            size=15,
             color=colors,
             line=dict(color="white", width=1)
         ),
-        customdata=np.round(node_energy, 2),
-        hovertemplate="Node %{text}<br>Energy: %{customdata} J<extra></extra>"
+        customdata=[
+            round(energy[n], 2) for n in nodes
+        ],
+        hovertemplate=(
+            "Node %{text}<br>"
+            "Energy: %{customdata} J<extra></extra>"
+        )
     )
 
-    fig = go.Figure([edge_trace, node_trace])
+    traces = [edges, sensor_trace]
+
+    if st.session_state.target:
+        tx, ty = st.session_state.target
+
+        target_trace = go.Scatter(
+            x=[tx],
+            y=[ty],
+            mode="markers+text",
+            text=["🎯 TARGET"],
+            textposition="top center",
+            marker=dict(
+                size=24,
+                color="#ff3366",
+                symbol="star"
+            )
+        )
+
+        traces.append(target_trace)
+
+    fig = go.Figure(traces)
+
     fig.update_layout(
-        height=560,
-        margin=dict(l=5, r=5, t=10, b=5),
+        height=580,
         paper_bgcolor="#07111f",
         plot_bgcolor="#07111f",
         font_color="white",
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False),
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(range=[0, field_size], visible=False),
+        yaxis=dict(
+            range=[0, field_size],
+            visible=False,
+            scaleanchor="x"
+        ),
         showlegend=False
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
 with right:
-    st.subheader("📈 Network Health")
+    st.subheader("📈 Network Performance")
 
     history = pd.DataFrame(st.session_state.history)
 
     if not history.empty:
         chart = go.Figure()
+
         chart.add_trace(go.Scatter(
             x=history["Cycle"],
             y=history["Average Energy"],
-            name="Avg Energy",
+            name="Energy",
             line=dict(color="#00e5ff", width=3)
         ))
+
         chart.add_trace(go.Scatter(
             x=history["Cycle"],
             y=history["Delivery Rate"],
             name="Delivery %",
-            line=dict(color="#00ff99", width=3),
+            line=dict(color="#00ff88", width=3),
             yaxis="y2"
         ))
+
         chart.update_layout(
-            height=300,
+            height=330,
             paper_bgcolor="#07111f",
             plot_bgcolor="#07111f",
             font_color="white",
+            margin=dict(l=5, r=5, t=20, b=5),
             xaxis_title="Cycle",
-            yaxis=dict(title="Energy"),
+            yaxis=dict(title="Energy (J)"),
             yaxis2=dict(
                 title="Delivery %",
                 overlaying="y",
                 side="right"
-            ),
-            margin=dict(l=5, r=5, t=20, b=5)
+            )
         )
+
         st.plotly_chart(chart, use_container_width=True)
 
-    st.subheader("🚨 Alerts")
-    if st.session_state.alerts:
-        for alert in reversed(st.session_state.alerts[-5:]):
-            st.warning(alert)
+    st.subheader("🚨 System Events")
+
+    if st.session_state.events:
+        for event in reversed(st.session_state.events[-8:]):
+            st.write(event)
     else:
-        st.success("No critical events detected.")
+        st.success("System operating normally.")
 
-st.subheader("📊 Node Energy Table")
+st.subheader("📊 Sensor Node Status")
 
-table = pd.DataFrame({
-    "Node": list(energy.keys()),
-    "Energy (J)": [round(v, 3) for v in energy.values()],
-    "Status": [
-        "DEAD" if v <= 0 else
-        "LOW" if v < battery * 0.2 else
+rows = []
+
+for n in nodes:
+    status = (
+        "SINK" if n == sink else
+        "FAILED" if n in st.session_state.faults else
+        "DEAD" if energy[n] <= 0 else
+        "LOW" if energy[n] < initial_energy * 0.2 else
         "ACTIVE"
-        for v in energy.values()
-    ],
-    "Neighbors": [G.degree(n) for n in G.nodes()]
-})
+    )
+
+    rows.append({
+        "Node": n,
+        "Energy (J)": round(energy[n], 3),
+        "Neighbors": len(neighbors(n)),
+        "Status": status
+    })
 
 st.dataframe(
-    table,
+    pd.DataFrame(rows),
     use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Energy (J)": st.column_config.NumberColumn(format="%.3f")
-    }
+    hide_index=True
 )
 
-st.subheader("🧪 Protocol Experiment")
+st.subheader("🎯 Target Detection")
 
-if len(history := pd.DataFrame(st.session_state.history)) > 2:
-    latest = history.iloc[-1]
-    first = history.iloc[0]
-    energy_used = max(0, first["Average Energy"] - latest["Average Energy"])
+if st.session_state.target:
+    tx, ty = st.session_state.target
 
-    a, b, c = st.columns(3)
-    a.metric("Routing", routing)
-    b.metric("Energy Consumed", f"{energy_used:.2f} J")
-    c.metric("Current Cycle", int(latest["Cycle"]))
+    detected = []
 
-st.download_button(
-    "⬇️ Download Experiment Log",
-    data=pd.DataFrame(st.session_state.history).to_csv(index=False),
-    file_name="wsn_experiment_log.csv",
-    mime="text/csv"
-)
+    for n in nodes:
+        if energy[n] > 0:
+            d = np.sqrt(
+                (nodes[n][0] - tx) ** 2 +
+                (nodes[n][1] - ty) ** 2
+            )
 
-st.caption(
-    "This project uses algorithmic sensor generation only — no dataset and no ML model. "
-    "Suitable for demonstrating WSN routing, MAC/energy concepts, topology changes, "
-    "fault detection and performance analysis."
-)
+            if d <= radio_range:
+                detected.append(n)
+
+    if detected:
+        st.success(
+            f"Target detected by sensor nodes: "
+            f"{', '.join(map(str, detected))}"
+        )
+    else:
+        st.warning("Target is currently outside sensor coverage.")
+else:
+    st.info("Press 'Generate Target' to simulate an event.")
+
+if not history.empty:
+    st.download_button(
+        "⬇️ Download Experiment Log",
+        data=history.to_csv(index=False),
+        file_name="wsn_experiment_log.csv",
+        mime="text/csv"
+    )
